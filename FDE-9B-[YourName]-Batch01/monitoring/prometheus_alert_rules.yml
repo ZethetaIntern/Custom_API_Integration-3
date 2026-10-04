@@ -1,0 +1,188 @@
+# ==============================================================================
+# MERIDIAN MANUFACTURING LTD. - PROMETHEUS ENTERPRISE ALERTING RULES
+# SPECIFICATION: DELIVERABLE D6 - MONITORING, OBSERVABILITY & ALERTING
+# REVISION: 2026.10-PROD
+# ==============================================================================
+
+groups:
+  - name: meridian_financial_pipeline_alerts
+    rules:
+      - alert: FinancialReconciliationZeroBreakBreach
+        expr: abs(daily_financial_reconciliation_break_amount_inr) > 0
+        for: 0m
+        labels:
+          severity: P1-Critical
+          tier: financial-integrity
+          alert_id: ALT-001
+        annotations:
+          summary: "CRITICAL: Financial reconciliation break detected in GL sync"
+          description: "Reconciliation engine detected non-zero financial variance of {{ $value }} INR. Dual-entry balance broken. Pipeline frozen automatically via RB-FIN-001."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-FIN-001"
+
+      - alert: SapRfcPoolExhaustionCritical
+        expr: sum(sap_rfc_pool_active_connections) >= 45
+        for: 1m
+        labels:
+          severity: P2-High
+          tier: erp-infrastructure
+          alert_id: ALT-002
+        annotations:
+          summary: "HIGH: SAP RFC Connection Pool near 90% allocation"
+          description: "Active RFC connections to Pune SAP S/4HANA reached {{ $value }} / 50. Approaching connection starvation. Throttling initiated."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-RFC-002"
+
+      - alert: FinSightApiCircuitBreakerOpen
+        expr: circuit_breaker_state{target="finsight"} == 1
+        for: 30s
+        labels:
+          severity: P1-Critical
+          tier: api-egress
+          alert_id: ALT-003
+        annotations:
+          summary: "CRITICAL: FinSight Ingestion API Circuit Breaker is OPEN"
+          description: "Circuit breaker tripped due to >=50% error rate over 100 requests. Traffic failing fast and spooling to Kafka buffer."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-CB-003"
+
+      - alert: KafkaConsumerGroupLagSpike
+        expr: sum by (consumergroup) (kafka_consumergroup_lag{consumergroup="meridian-fin-ingest"}) > 25000
+        for: 5m
+        labels:
+          severity: P2-High
+          tier: streaming-middleware
+          alert_id: ALT-004
+        annotations:
+          summary: "HIGH: Kafka consumer group lag exceeded 25,000 messages"
+          description: "Consumer group 'meridian-fin-ingest' has lag of {{ $value }} messages. Auto-scaling worker pods."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-KAF-004"
+
+      - alert: DlqQuarantineInflowSurge
+        expr: sum(rate(pipeline_errors_total{error_class="DATA_QUALITY"}[5m])) > 10
+        for: 3m
+        labels:
+          severity: P2-High
+          tier: data-governance
+          alert_id: ALT-005
+        annotations:
+          summary: "HIGH: Quarantine inflow surge detected in Data Quality checks"
+          description: "Data quality failures isolating to S3 DLQ at {{ $value }} records/sec. Master data team notified via Jira automation."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-DLQ-005"
+
+      - alert: DataFreshnessSlaBreached
+        expr: (time() - max(pipeline_last_successful_sync_timestamp)) / 60 > 30
+        for: 2m
+        labels:
+          severity: P1-Critical
+          tier: service-level-agreement
+          alert_id: ALT-006
+        annotations:
+          summary: "CRITICAL: Data Freshness SLA breached (>30 minutes since last sync)"
+          description: "Pipeline has not committed a successful delta batch in {{ $value }} minutes. Target SLA is 30 minutes."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-SLA-006"
+
+      - alert: FinSightRateLimit429Throttle
+        expr: rate(http_client_requests_total{status_code="429"}[2m]) > 2
+        for: 1m
+        labels:
+          severity: P3-Medium
+          tier: api-egress
+          alert_id: ALT-007
+        annotations:
+          summary: "MEDIUM: FinSight API 429 Rate Throttling active"
+          description: "Ingestion API is returning 429 Too Many Requests at {{ $value }} req/sec. Scaling down worker concurrency."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-API-007"
+
+      - alert: MplsIntegrationBandwidthSpike
+        expr: (sum(rate(container_network_transmit_bytes_total{namespace="meridian-etl"}[1m])) * 8 / 1000000) > 100
+        for: 2m
+        labels:
+          severity: P2-High
+          tier: network-infrastructure
+          alert_id: ALT-008
+        annotations:
+          summary: "HIGH: MPLS Integration egress bandwidth approaching 112.5 Mbps cap"
+          description: "Current integration bandwidth is {{ $value }} Mbps (88% of 112.5 Mbps allocation). Token bucket shaper engaging."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-NET-008"
+
+      - alert: NightlySapBatchJobWindowCollision
+        expr: (hour() >= 1 and hour() < 4 or (hour() == 4 and minute() <= 30)) and sum(sap_rfc_active_extractions) > 0
+        for: 1m
+        labels:
+          severity: P2-High
+          tier: erp-infrastructure
+          alert_id: ALT-009
+        annotations:
+          summary: "HIGH: Active extraction running during SAP RGGBS000 batch window"
+          description: "Integration jobs detected between 01:00-04:30 IST. Draining active connections to avoid lock contention."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-SAP-009"
+
+      - alert: WorkerNodeMemoryPressure
+        expr: container_memory_working_set_bytes{container="pipeline-worker"} / container_spec_memory_limit_bytes > 0.88
+        for: 2m
+        labels:
+          severity: P2-High
+          tier: container-platform
+          alert_id: ALT-010
+        annotations:
+          summary: "HIGH: Worker container memory saturation (>88% of limit)"
+          description: "Pod memory working set at {{ $value | humanizePercentage }} of limit. Initiating GC cycle and node auto-scaling."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-SYS-010"
+
+      - alert: HighProcessingLatencyP99Spike
+        expr: histogram_quantile(0.99, sum by (le) (rate(pipeline_processing_duration_seconds_bucket[5m]))) > 30
+        for: 5m
+        labels:
+          severity: P3-Medium
+          tier: performance
+          alert_id: ALT-011
+        annotations:
+          summary: "MEDIUM: Pipeline P99 processing latency exceeds 30 seconds"
+          description: "P99 duration reached {{ $value }} seconds. Collecting Jaeger distributed tracing spans."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-LAT-011"
+
+      - alert: FinSightOAuthAuthRejections
+        expr: rate(http_client_requests_total{status_code=~"401|403"}[2m]) > 0
+        for: 30s
+        labels:
+          severity: P1-Critical
+          tier: security-auth
+          alert_id: ALT-012
+        annotations:
+          summary: "CRITICAL: FinSight OAuth2 authentication rejections detected"
+          description: "HTTP 401/403 responses detected. Forcing AWS Secrets Manager credential refresh."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-AUTH-012"
+
+      - alert: PlantMasterDataLookupsFailing
+        expr: sum by (plant_id) (rate(pipeline_errors_total{error_code="ERR-MAP-001"}[5m])) > 5
+        for: 3m
+        labels:
+          severity: P2-High
+          tier: data-governance
+          alert_id: ALT-013
+        annotations:
+          summary: "HIGH: Cost Centre / Profit Centre lookup failures spiking"
+          description: "ERR-MAP-001 rate is {{ $value }} /sec. Invalidating and warming Redis master data cache."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-MDM-013"
+
+      - alert: SapTableEnqueueLockStorm
+        expr: rate(pipeline_errors_total{error_code="ERR-EXT-003"}[3m]) > 8
+        for: 2m
+        labels:
+          severity: P3-Medium
+          tier: erp-infrastructure
+          alert_id: ALT-014
+        annotations:
+          summary: "MEDIUM: SAP Table Enqueue Lock storm detected"
+          description: "Table locks encountering {{ $value }} conflicts/sec. Pausing extraction and shifting to 15-min cadence."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-LCK-014"
+
+      - alert: DlqBacklogUnresolved48Hours
+        expr: (time() - s3_dlq_oldest_record_timestamp_seconds) / 3600 > 48
+        for: 15m
+        labels:
+          severity: P3-Medium
+          tier: statutory-compliance
+          alert_id: ALT-015
+        annotations:
+          summary: "MEDIUM: Quarantined DLQ records unreviewed for >48 hours"
+          description: "Oldest unreviewed DLQ record has age {{ $value }} hours. Escalating to Head of Internal Audit."
+          runbook_url: "https://wiki.meridian.internal/runbooks/RB-DLQ-015"

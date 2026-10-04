@@ -1,0 +1,233 @@
+{
+  "info": {
+    "_postman_id": "89b552f9-2928-4c44-a17e-734689b552f9",
+    "name": "Meridian Manufacturing - FinSight 4.2 Integration Test Suite",
+    "description": "Production Postman test collection for FinSight 4.2 REST APIs, OAuth 2.0 mTLS authentication, batch ingestion, DLQ replay, and reconciliation verification.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://api.finsight.meridian.internal", "type": "string" },
+    { "key": "authUrl", "value": "https://auth.finsight.meridian.internal", "type": "string" },
+    { "key": "clientId", "value": "meridian_sap_prod_client", "type": "string" },
+    { "key": "clientSecret", "value": "{{PROD_CLIENT_SECRET}}", "type": "string" },
+    { "key": "jwtToken", "value": "", "type": "string" },
+    { "key": "lastBatchId", "value": "BATCH-20261004-1100-01", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "01. Authentication & Security",
+      "item": [
+        {
+          "name": "Acquire OAuth 2.0 Bearer Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status code is 200 OK\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Token response contains access_token and expires_in\", function () {",
+                  "    var jsonData = pm.response.json();",
+                  "    pm.expect(jsonData.access_token).to.be.a('string');",
+                  "    pm.expect(jsonData.token_type).to.eql('Bearer');",
+                  "    pm.expect(jsonData.expires_in).to.be.above(0);",
+                  "    pm.collectionVariables.set(\"jwtToken\", jsonData.access_token);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type", "value": "client_credentials", "type": "text" },
+                { "key": "client_id", "value": "{{clientId}}", "type": "text" },
+                { "key": "client_secret", "value": "{{clientSecret}}", "type": "text" },
+                { "key": "scope", "value": "finsight.gl.write finsight.ap.write finsight.recon.read", "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{authUrl}}/oauth/v2/token",
+              "host": ["{{authUrl}}"],
+              "path": ["oauth", "v2", "token"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "02. Financial Batch Ingestion",
+      "item": [
+        {
+          "name": "Submit GL Journal Micro-Batch",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "var uuid = pm.variables.replaceIn('{{$guid}}');",
+                  "pm.request.headers.add({key: 'X-Correlation-ID', value: uuid});",
+                  "pm.request.headers.add({key: 'X-Idempotency-Key', value: 'IDEMP-' + Date.now()});"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status code is 200 OK\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Batch committed with 0 errors\", function () {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json.status).to.eql(\"COMMITTED\");",
+                  "    pm.expect(json.records_processed).to.eql(2);",
+                  "    pm.expect(json.quarantined_count).to.eql(0);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{jwtToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"batch_id\": \"BATCH-20261004-1100-01\",\n  \"plant_id\": \"1100\",\n  \"source_system\": \"SAP_S4HANA_P40\",\n  \"record_count\": 2,\n  \"payload_sha256\": \"8f4a1b920194827104bce9048a1c8f12a34b2201934812304910293481029348\",\n  \"records\": [\n    {\n      \"sap_document_id\": \"0100049280\",\n      \"line_item\": \"000001\",\n      \"fiscal_year\": 2026,\n      \"fiscal_period\": 7,\n      \"posting_date\": \"2026-10-04\",\n      \"gl_account\": \"0000400010\",\n      \"cost_center\": \"CC1100-ENG\",\n      \"profit_center\": \"PC1100\",\n      \"amount_inr\": 482500.00,\n      \"debit_credit_ind\": \"S\",\n      \"gstin\": \"27AABCM8892A1Z1\",\n      \"hsn_sac_code\": \"84082020\"\n    },\n    {\n      \"sap_document_id\": \"0100049280\",\n      \"line_item\": \"000002\",\n      \"fiscal_year\": 2026,\n      \"fiscal_period\": 7,\n      \"posting_date\": \"2026-10-04\",\n      \"gl_account\": \"0000200020\",\n      \"cost_center\": \"CC1100-ENG\",\n      \"profit_center\": \"PC1100\",\n      \"amount_inr\": 482500.00,\n      \"debit_credit_ind\": \"H\",\n      \"gstin\": \"27AABCM8892A1Z1\",\n      \"hsn_sac_code\": \"84082020\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v2/ledger/batch",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v2", "ledger", "batch"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "03. Reconciliation & Audit",
+      "item": [
+        {
+          "name": "Fetch Batch Reconciliation Certificate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status code is 200 OK\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Reconciliation variance is zero break\", function () {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json.financial_reconciliation.absolute_financial_variance_inr).to.eql(0);",
+                  "    pm.expect(json.certification.reconciliation_passed).to.eql(true);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v2/recon/reports/{{lastBatchId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v2", "recon", "reports", "{{lastBatchId}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "04. Dead Letter Queue Management",
+      "item": [
+        {
+          "name": "Query Quarantined DLQ Envelopes",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v2/dlq/messages?plant_id=1100&status=PENDING_REVIEW",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v2", "dlq", "messages"],
+              "query": [
+                { "key": "plant_id", "value": "1100" },
+                { "key": "status", "value": "PENDING_REVIEW" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Trigger Operational Replay",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{jwtToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filter\": {\n    \"plant_id\": \"1100\",\n    \"error_code\": \"ERR-MAP-003\"\n  },\n  \"dry_run\": false,\n  \"audit_justification\": \"Corrected GSTIN registration for Pune Chakan facility.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v2/dlq/replay",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v2", "dlq", "replay"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "05. Observability & Health",
+      "item": [
+        {
+          "name": "System Healthcheck Liveness Probe",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status code is 200 OK\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Health status is UP\", function () {",
+                  "    var json = pm.response.json();",
+                  "    pm.expect(json.status).to.eql(\"UP\");",
+                  "    pm.expect(json.circuit_breaker_state).to.eql(0);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v2/healthz",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v2", "healthz"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

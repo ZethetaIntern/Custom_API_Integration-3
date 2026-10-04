@@ -1,0 +1,1982 @@
+openapi: 3.0.3
+
+# ============================================================
+# Zetheta FinSight 4.2 — Ingestion REST API
+# Meridian Manufacturing Ltd. Integration
+# Document ID : ZA-FDE-D2-MERIDIAN-001-OAS
+# Version     : 1.0.0
+# Date        : 2026-10-04
+# Spectral    : @stoplight/spectral-openapi + @stoplight/spectral-oas
+# ============================================================
+
+info:
+  title: Zetheta FinSight 4.2 — Financial Data Ingestion API
+  version: 2.0.0
+  description: |
+    ## Overview
+    Production REST API for ingesting financial data from SAP S/4HANA (2023 FPS02)
+    into Zetheta FinSight 4.2 Financial Analytics Platform.
+
+    Deployed on AWS Asia Pacific (Mumbai) `ap-south-1`.
+    All data remains within Indian territory (RBI Data Localisation compliant).
+
+    ## Authentication
+    All endpoints require OAuth 2.0 Bearer tokens obtained via Client Credentials Grant:
+    ```
+    POST https://auth.finsight.zetheta.in/oauth/v2/token
+    grant_type=client_credentials&client_id=...&client_secret=...&scope=...
+    ```
+
+    ## Idempotency
+    All `POST` and `PATCH` endpoints require an `Idempotency-Key` header (UUID v4).
+    Duplicate submissions with the same key return the cached response (HTTP 200)
+    with header `X-Idempotent-Replay: true`.
+
+    ## Rate Limits
+    Integration service tier: **5,000 requests / 60 seconds** with burst to 8,000.
+    Rate limit state is communicated via `X-RateLimit-*` response headers.
+
+    ## Pagination
+    All collection endpoints use cursor-based pagination (`cursor` + `limit` params).
+    Maximum `limit` is 1,000 records per page.
+
+    ## Error Responses
+    All error responses conform to **RFC 7807 Problem Details** (`application/problem+json`).
+
+    ## Data Conventions
+    - **Dates**: ISO 8601 / RFC 3339 (`YYYY-MM-DD` for date, full datetime with TZ for timestamps)
+    - **Amounts**: String-encoded decimal (max 4 decimal places) e.g. `"125000.00"`
+    - **Currency**: ISO 4217 3-character code e.g. `"INR"`, `"USD"`
+    - **Batch size**: Max 1,000 records per POST request body
+
+  contact:
+    name: Zetheta FDE Team — Meridian Integration
+    email: fde-meridian@zetheta.in
+    url: https://portal.zetheta.in/meridian
+  license:
+    name: Zetheta Proprietary — Client Restricted
+    url: https://zetheta.in/terms/api
+  termsOfService: https://zetheta.in/terms/api
+
+servers:
+  - url: https://api.finsight.zetheta.in
+    description: Production (AWS ap-south-1, Mumbai)
+  - url: https://api-uat.finsight.zetheta.in
+    description: UAT / Staging
+  - url: https://api-dev.finsight.zetheta.in
+    description: Development / Integration Testing
+
+# ============================================================
+# SECURITY SCHEMES
+# ============================================================
+security:
+  - OAuth2ClientCredentials: []
+
+# ============================================================
+# TAGS
+# ============================================================
+tags:
+  - name: General Ledger
+    description: GL journal entry ingestion (DST-001). Scope: `finsight.gl.write`
+  - name: Accounts Payable
+    description: AP open items ingestion (DST-002). Scope: `finsight.ap.write`
+  - name: Health
+    description: Service health and readiness checks
+
+# ============================================================
+# PATHS
+# ============================================================
+paths:
+
+  # ----------------------------------------------------------
+  # DST-001: POST /api/v2/finance/journal-entries
+  # GL Bulk Journal Entry Ingestion
+  # ----------------------------------------------------------
+  /api/v2/finance/journal-entries:
+    post:
+      operationId: ingestJournalEntries
+      summary: Ingest GL Journal Entry Batch (DST-001)
+      description: |
+        Accepts a batch of SAP General Ledger journal entry documents extracted
+        via ODP DataSource `0FI_GL_14` from `ACDOCA` (Universal Journal).
+
+        **Source:** SRC-001 `/sap/opu/odata/sap/ZZ_GL_JOURNAL_CDS`
+        **Kafka Topic:** `sap.delta.transformed.gl`
+        **ODP Provider:** `0FI_GL_14`
+        **Max batch size:** 1,000 line items per request.
+
+        Each document must be balanced (total debits = total credits in company code currency).
+        Unbalanced journals are rejected with HTTP 422.
+
+        ### Idempotency
+        The `Idempotency-Key` header is **required**. Retrying with the same key returns
+        the original response without re-processing.
+
+        ### GST Compliance
+        Tax split (CGST/SGST/IGST) is required for line items with a tax code.
+        All tax amounts must be denominated in INR (Section 194 / GST compliance).
+      tags:
+        - General Ledger
+      security:
+        - OAuth2ClientCredentials:
+            - finsight.gl.write
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XSourceSystem'
+        - $ref: '#/components/parameters/XPlantCode'
+      requestBody:
+        required: true
+        description: |
+          Batch of GL journal entry documents. Each document contains one or more
+          line items. Maximum 1,000 line items total across all documents in a batch.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JournalEntryBatchRequest'
+            examples:
+              singleDocumentBatch:
+                summary: Single balanced journal entry (purchase)
+                value:
+                  batchId: batch-gl-20261004-0600-001
+                  sourceSystem: SAP-S4HANA-PRD
+                  extractionTimestamp: "2026-10-04T06:00:00+05:30"
+                  odpDeltaToken: "ODP:0FI_GL_14:MH01:2026100406000000"
+                  companyCode: "1000"
+                  documents:
+                    - accountingDocument: "1400000123"
+                      companyCode: "1000"
+                      fiscalYear: "2026"
+                      fiscalPeriod: "010"
+                      documentType: SA
+                      postingDate: "2026-10-04"
+                      entryDate: "2026-10-04"
+                      documentDate: "2026-10-04"
+                      documentHeaderText: Raw material purchase - MH Plant 1
+                      referenceDocument: PO-4500001234
+                      lineItems:
+                        - lineItemNumber: "001"
+                          glAccount: "0000300000"
+                          debitCreditCode: S
+                          postingKey: "40"
+                          amountInTransactionCurrency:
+                            amount: "125000.00"
+                            currency: INR
+                          amountInCompanyCodeCurrency:
+                            amount: "125000.00"
+                            currency: INR
+                          exchangeRate: "1.000000"
+                          taxCode: I8
+                          taxSplit:
+                            cgstAmount: "5625.00"
+                            sgstAmount: "5625.00"
+                            igstAmount: "0.00"
+                            cessAmount: "0.00"
+                            taxCurrency: INR
+                          costObject:
+                            costCenter: CC_MH_PROD_01
+                            profitCenter: PC_MH_PLANT1
+                            wbsElement: null
+                            internalOrder: null
+                          lineItemText: "Steel coils 500MT"
+                          assignment: PO-4500001234-001
+                        - lineItemNumber: "002"
+                          glAccount: "0000200000"
+                          debitCreditCode: H
+                          postingKey: "50"
+                          amountInTransactionCurrency:
+                            amount: "125000.00"
+                            currency: INR
+                          amountInCompanyCodeCurrency:
+                            amount: "125000.00"
+                            currency: INR
+                          exchangeRate: "1.000000"
+                          taxCode: null
+                          taxSplit: null
+                          costObject: null
+                          lineItemText: Vendor payable - TATA STEEL LTD
+                          assignment: PO-4500001234-001
+      responses:
+        '201':
+          description: |
+            Batch accepted and queued for processing in the FinSight pipeline.
+            Events have been produced to Kafka topic `sap.delta.transformed.gl`.
+          headers:
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/XRateLimitLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/XRateLimitRemaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/XRateLimitReset'
+            X-RateLimit-Window:
+              $ref: '#/components/headers/XRateLimitWindow'
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+            Location:
+              description: URL to query batch processing status
+              schema:
+                type: string
+                example: /api/v2/finance/journal-entries/batch/batch-gl-20261004-0600-001
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchIngestResponse'
+              example:
+                data:
+                  batchId: batch-gl-20261004-0600-001
+                  status: ACCEPTED
+                  acceptedDocuments: 1
+                  acceptedLineItems: 2
+                  rejectedDocuments: 0
+                  pipelineEventId: evt-kafka-sap.delta.transformed.gl-p12-o44821
+                  estimatedProcessingTime: PT30S
+                meta:
+                  requestId: req-f47ac10b-58cc-4372-a567-0e02b2c3d479
+                  processedAt: "2026-10-04T00:30:01.123Z"
+                  apiVersion: "2.0"
+                links:
+                  self: /api/v2/finance/journal-entries
+                  status: /api/v2/finance/journal-entries/batch/batch-gl-20261004-0600-001
+        '200':
+          description: |
+            Idempotent replay — a request with this `Idempotency-Key` was already processed.
+            The original response is returned unchanged.
+          headers:
+            X-Idempotent-Replay:
+              description: Indicates this is a replayed idempotent response
+              schema:
+                type: boolean
+                example: true
+            X-Idempotent-Key:
+              description: The idempotency key that was matched
+              schema:
+                type: string
+                example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+            X-Idempotent-Cached-At:
+              description: ISO 8601 timestamp of when original request was cached
+              schema:
+                type: string
+                format: date-time
+                example: "2026-10-04T00:30:01.123Z"
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/XRateLimitLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/XRateLimitRemaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/XRateLimitReset'
+            X-RateLimit-Window:
+              $ref: '#/components/headers/XRateLimitWindow'
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchIngestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  # ----------------------------------------------------------
+  # DST-001 Batch Status
+  # ----------------------------------------------------------
+  /api/v2/finance/journal-entries/batch/{batchId}:
+    get:
+      operationId: getJournalEntryBatchStatus
+      summary: Get GL Batch Processing Status
+      description: |
+        Poll the processing status of a previously submitted GL journal entry batch.
+        Status transitions: `ACCEPTED` → `PROCESSING` → `COMPLETED` | `PARTIAL_FAILURE` | `FAILED`
+      tags:
+        - General Ledger
+      security:
+        - OAuth2ClientCredentials:
+            - finsight.gl.write
+      parameters:
+        - name: batchId
+          in: path
+          required: true
+          description: Batch ID returned in the POST response
+          schema:
+            type: string
+            pattern: '^batch-[a-z]+-\d{8}-\d{4}-\d{3}$'
+            example: batch-gl-20261004-0600-001
+        - $ref: '#/components/parameters/XCorrelationId'
+      responses:
+        '200':
+          description: Batch status retrieved successfully
+          headers:
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/XRateLimitLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/XRateLimitRemaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/XRateLimitReset'
+            X-RateLimit-Window:
+              $ref: '#/components/headers/XRateLimitWindow'
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  # ----------------------------------------------------------
+  # DST-002: POST /api/v2/finance/accounts-payable/items
+  # AP Open Items Bulk Ingestion
+  # ----------------------------------------------------------
+  /api/v2/finance/accounts-payable/items:
+    post:
+      operationId: ingestAccountsPayableItems
+      summary: Ingest AP Open Items Batch (DST-002)
+      description: |
+        Accepts a batch of SAP Accounts Payable open items extracted via ODP DataSource
+        `0FI_AP_4` from `BSIK` / `BSAK` (AP line item tables).
+
+        **Source:** SRC-002 `/sap/opu/odata/sap/ZZ_AP_OPENITEMS_CDS`
+        **Kafka Topic:** `sap.delta.transformed.ap`
+        **ODP Provider:** `0FI_AP_4`
+        **Max batch size:** 1,000 AP items per request.
+
+        ### Section 194 TDS Compliance
+        Withholding tax details (`withholdingTax`) are **required** for all items where
+        the vendor is subject to TDS under Section 194C, 194J, or 194H.
+        TDS base amount, tax rate, and deduction status must be accurately reflected.
+
+        ### GST Input Tax Credit
+        The `gstInputTaxCreditEligible` flag must be set based on the vendor's GST
+        registration status and the nature of the supply (goods vs services).
+      tags:
+        - Accounts Payable
+      security:
+        - OAuth2ClientCredentials:
+            - finsight.ap.write
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XSourceSystem'
+        - $ref: '#/components/parameters/XPlantCode'
+      requestBody:
+        required: true
+        description: |
+          Batch of AP open item records. Maximum 1,000 items per request.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/APItemBatchRequest'
+            examples:
+              singleAPItem:
+                summary: Single AP item with Section 194C TDS
+                value:
+                  batchId: batch-ap-20261004-0600-001
+                  sourceSystem: SAP-S4HANA-PRD
+                  extractionTimestamp: "2026-10-04T06:00:00+05:30"
+                  companyCode: "1000"
+                  items:
+                    - vendor: VENDOR_0010012345
+                      vendorName: TATA STEEL LIMITED
+                      companyCode: "1000"
+                      documentNumber: "1900000456"
+                      fiscalYear: "2026"
+                      documentType: KR
+                      postingDate: "2026-09-25"
+                      documentDate: "2026-09-20"
+                      netDueDate: "2026-10-25"
+                      outstandingAmount:
+                        amount: "3450000.00"
+                        currency: INR
+                      paymentTerms: NT30
+                      paymentBlock: null
+                      paymentMethod: T
+                      bankKey: HDFC0000123
+                      bankAccount: "50100123456789"
+                      ageingBucket: CURRENT
+                      daysOverdue: 0
+                      withholdingTax:
+                        section: 194C
+                        taxType: C1
+                        baseAmount: "3450000.00"
+                        taxRate: "2.00"
+                        taxAmount: "69000.00"
+                        surchargeAmount: "0.00"
+                        cessAmount: "2760.00"
+                        totalTdsAmount: "71760.00"
+                        deductionStatus: DEDUCTED
+                        tdsDeductedDate: "2026-09-25"
+                        currency: INR
+                      gstInputTaxCreditEligible: true
+                      gstTaxCode: I8
+                      invoiceReference: TATA-INV-2026-98234
+                      purchaseOrderReference: "4500001234"
+      responses:
+        '201':
+          description: AP item batch accepted and queued for processing.
+          headers:
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/XRateLimitLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/XRateLimitRemaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/XRateLimitReset'
+            X-RateLimit-Window:
+              $ref: '#/components/headers/XRateLimitWindow'
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchIngestResponse'
+        '200':
+          description: Idempotent replay of previously accepted batch.
+          headers:
+            X-Idempotent-Replay:
+              description: True if this is a replayed idempotent response
+              schema:
+                type: boolean
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/XRateLimitLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/XRateLimitRemaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/XRateLimitReset'
+            X-RateLimit-Window:
+              $ref: '#/components/headers/XRateLimitWindow'
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchIngestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  # ----------------------------------------------------------
+  # Health Check
+  # ----------------------------------------------------------
+  /api/v2/health:
+    get:
+      operationId: getHealthStatus
+      summary: Service Health Check
+      description: |
+        Returns the current health status of the FinSight Ingestion API and its
+        downstream dependencies (Kafka, PostgreSQL, Redis).
+        Used by Circuit Breaker probe in the HALF-OPEN state.
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Service is healthy and ready to accept requests.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: UP
+                timestamp: "2026-10-04T00:30:00.000Z"
+                version: 2.0.0
+                dependencies:
+                  kafka:
+                    status: UP
+                    latencyMs: 4
+                  postgresql:
+                    status: UP
+                    latencyMs: 2
+                  redis:
+                    status: UP
+                    latencyMs: 1
+        '503':
+          description: One or more dependencies are unhealthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+# ============================================================
+# COMPONENTS
+# ============================================================
+components:
+
+  # ----------------------------------------------------------
+  # SECURITY SCHEMES
+  # ----------------------------------------------------------
+  securitySchemes:
+    OAuth2ClientCredentials:
+      type: oauth2
+      description: |
+        OAuth 2.0 Client Credentials Grant (RFC 6749 §4.4).
+        Obtain a Bearer JWT token from the FinSight Auth Server.
+        Token TTL: 3,600 seconds. Refresh 5 minutes before expiry.
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.finsight.zetheta.in/oauth/v2/token
+          scopes:
+            finsight.gl.write: Write General Ledger journal entries (DST-001)
+            finsight.ap.write: Write Accounts Payable open items (DST-002)
+            finsight.ar.write: Write Accounts Receivable open items (DST-003)
+            finsight.co.write: Write Controlling master data and budgets (DST-004/005/011)
+            finsight.inventory.write: Write inventory and material valuation (DST-006/012)
+            finsight.procurement.write: Write purchase orders (DST-007)
+            finsight.sales.write: Write sales orders (DST-008)
+            finsight.assets.write: Write fixed asset master data (DST-009)
+            finsight.treasury.write: Write bank statement data (DST-010)
+            finsight.recon.read: Read reconciliation reports (EoD reconciliation)
+
+  # ----------------------------------------------------------
+  # PARAMETERS
+  # ----------------------------------------------------------
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        UUID v4 idempotency key. Must be unique per logical operation.
+        Retrying with the same key returns the original response (HTTP 200)
+        without re-processing. Keys expire after 24 hours.
+      schema:
+        type: string
+        format: uuid
+        pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+        example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+
+    XCorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: |
+        Client-generated correlation ID for distributed tracing across
+        the integration pipeline (ODP Service → Kafka → Transformation Worker → FinSight).
+        If not provided, the server generates one and returns it in the response.
+      schema:
+        type: string
+        maxLength: 64
+        example: corr-meridian-20261004-0600-001
+
+    XSourceSystem:
+      name: X-Source-System
+      in: header
+      required: false
+      description: Identifier of the source system originating this data.
+      schema:
+        type: string
+        enum:
+          - SAP-S4HANA-PRD
+          - SAP-S4HANA-QAS
+          - SAP-S4HANA-DEV
+          - MANUAL
+        example: SAP-S4HANA-PRD
+
+    XPlantCode:
+      name: X-Plant-Code
+      in: header
+      required: false
+      description: SAP Plant code for the data being ingested (used for routing and audit).
+      schema:
+        type: string
+        maxLength: 4
+        pattern: '^[A-Z0-9]{2,4}$'
+        example: MH01
+
+  # ----------------------------------------------------------
+  # HEADERS
+  # ----------------------------------------------------------
+  headers:
+    XRateLimitLimit:
+      description: Maximum number of requests allowed in the current rate limit window.
+      schema:
+        type: integer
+        example: 5000
+    XRateLimitRemaining:
+      description: Number of requests remaining in the current rate limit window.
+      schema:
+        type: integer
+        example: 4987
+    XRateLimitReset:
+      description: Unix epoch timestamp (UTC) when the current rate limit window resets.
+      schema:
+        type: integer
+        format: int64
+        example: 1759537260
+    XRateLimitWindow:
+      description: Duration of the rate limit window in seconds.
+      schema:
+        type: integer
+        example: 60
+    XRequestId:
+      description: Server-generated unique request ID for this response. Use for support.
+      schema:
+        type: string
+        format: uuid
+        example: req-f47ac10b-58cc-4372-a567-0e02b2c3d479
+
+  # ----------------------------------------------------------
+  # SCHEMAS
+  # ----------------------------------------------------------
+  schemas:
+
+    # --------------------------------------------------------
+    # GENERAL LEDGER SCHEMAS (DST-001)
+    # --------------------------------------------------------
+
+    JournalEntryBatchRequest:
+      type: object
+      description: |
+        Root request body for GL journal entry batch ingestion.
+        Contains metadata about the batch and an array of document headers.
+      required:
+        - batchId
+        - sourceSystem
+        - extractionTimestamp
+        - companyCode
+        - documents
+      properties:
+        batchId:
+          type: string
+          description: |
+            Client-generated unique identifier for this batch.
+            Convention: `batch-gl-{YYYYMMDD}-{HHMM}-{SEQ}`.
+            Must be unique per extraction cycle.
+          pattern: '^batch-[a-z]+-\d{8}-\d{4}-\d{3}$'
+          maxLength: 64
+          example: batch-gl-20261004-0600-001
+        sourceSystem:
+          type: string
+          description: Identifier of the SAP source system.
+          enum:
+            - SAP-S4HANA-PRD
+            - SAP-S4HANA-QAS
+            - SAP-S4HANA-DEV
+          example: SAP-S4HANA-PRD
+        extractionTimestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of when ODP delta extraction was triggered.
+          example: "2026-10-04T06:00:00+05:30"
+        odpDeltaToken:
+          type: string
+          description: |
+            Opaque ODP delta token from SAP representing the extraction watermark.
+            Format: `ODP:{DataSource}:{PlantCode}:{YYYYMMDDHHmmss}`.
+            Stored in Redis for exactly-once extraction tracking.
+          example: "ODP:0FI_GL_14:MH01:2026100406000000"
+        companyCode:
+          type: string
+          description: SAP Company Code for all documents in this batch.
+          pattern: '^\d{4}$'
+          example: "1000"
+        isDlqReplay:
+          type: boolean
+          description: |
+            Set to `true` if this batch is a replay from the Dead Letter Queue.
+            Affects audit logging and monitoring counters.
+          default: false
+          example: false
+        documents:
+          type: array
+          description: Array of GL document headers. Each header contains line items.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/JournalEntryDocument'
+
+    JournalEntryDocument:
+      type: object
+      description: |
+        A single SAP Accounting Document header, containing one or more line items.
+        Corresponds to a single entry in `ACDOCA` (Universal Journal).
+        Documents must be balanced: sum of debit amounts = sum of credit amounts
+        in company code currency.
+      required:
+        - accountingDocument
+        - companyCode
+        - fiscalYear
+        - fiscalPeriod
+        - documentType
+        - postingDate
+        - entryDate
+        - documentDate
+        - lineItems
+      properties:
+        accountingDocument:
+          type: string
+          description: SAP Accounting Document Number (10 digits, zero-padded).
+          pattern: '^\d{10}$'
+          example: "1400000123"
+        companyCode:
+          type: string
+          description: SAP Company Code (4-digit numeric).
+          pattern: '^\d{4}$'
+          example: "1000"
+        fiscalYear:
+          type: string
+          description: SAP Fiscal Year (4-digit numeric).
+          pattern: '^\d{4}$'
+          example: "2026"
+        fiscalPeriod:
+          type: string
+          description: SAP Fiscal Period (3-digit, zero-padded, 001-016).
+          pattern: '^0(0[1-9]|1[0-6])$'
+          example: "010"
+        documentType:
+          type: string
+          description: |
+            SAP Document Type (2-char code).
+            Common values: SA (GL posting), KR (vendor invoice), DR (customer invoice),
+            KZ (vendor payment), DZ (customer payment), RE (goods receipt/invoice).
+          maxLength: 2
+          minLength: 1
+          example: SA
+        postingDate:
+          type: string
+          format: date
+          description: Date on which the document is posted in SAP (ISO 8601 date).
+          example: "2026-10-04"
+        entryDate:
+          type: string
+          format: date
+          description: Date on which the document was entered in SAP.
+          example: "2026-10-04"
+        documentDate:
+          type: string
+          format: date
+          description: Date on the source document (invoice date, payment date, etc.).
+          example: "2026-10-04"
+        documentHeaderText:
+          type: string
+          description: Free-text description of the document header.
+          maxLength: 25
+          example: Raw material purchase - MH Plant 1
+        referenceDocument:
+          type: string
+          description: Reference document number (PO, SO, external reference).
+          maxLength: 16
+          example: PO-4500001234
+        tradingPartner:
+          type: string
+          description: |
+            SAP Trading Partner company code (from ACDOCA.RASSC).
+            Populated for intercompany transactions only. Null for third-party.
+          maxLength: 6
+          nullable: true
+          example: null
+        isIntercompany:
+          type: boolean
+          description: |
+            True if this document is an intercompany transaction.
+            Derived from ACDOCA.RASSC being non-null.
+          default: false
+          example: false
+        lineItems:
+          type: array
+          description: |
+            Array of GL line items for this document.
+            Minimum 2 items (at least one debit and one credit).
+            Maximum 999 line items per document.
+          minItems: 2
+          maxItems: 999
+          items:
+            $ref: '#/components/schemas/JournalEntryLineItem'
+
+    JournalEntryLineItem:
+      type: object
+      description: |
+        A single GL line item within an accounting document.
+        Corresponds to a single row in ACDOCA (Universal Journal).
+      required:
+        - lineItemNumber
+        - glAccount
+        - debitCreditCode
+        - postingKey
+        - amountInTransactionCurrency
+        - amountInCompanyCodeCurrency
+        - exchangeRate
+      properties:
+        lineItemNumber:
+          type: string
+          description: Line item number within the document (3-digit, zero-padded).
+          pattern: '^\d{3}$'
+          example: "001"
+        glAccount:
+          type: string
+          description: |
+            SAP GL Account number (10-digit, zero-padded).
+            Must exist in the Meridian Chart of Accounts (CAUS-MERI).
+          pattern: '^\d{10}$'
+          example: "0000300000"
+        glAccountDescription:
+          type: string
+          description: GL account description (denormalized from SAP SKA1/SKAT).
+          maxLength: 50
+          example: Raw Materials Stock
+        debitCreditCode:
+          type: string
+          description: |
+            SAP Debit/Credit indicator.
+            `S` = Debit (Soll), `H` = Credit (Haben).
+          enum:
+            - S
+            - H
+          example: S
+        postingKey:
+          type: string
+          description: |
+            SAP Posting Key (2-digit).
+            Controls account type and debit/credit side.
+            Common: 40=Debit GL, 50=Credit GL, 01=Customer debit, 31=Vendor credit.
+          pattern: '^\d{2}$'
+          example: "40"
+        amountInTransactionCurrency:
+          $ref: '#/components/schemas/MonetaryAmount'
+        amountInCompanyCodeCurrency:
+          $ref: '#/components/schemas/MonetaryAmount'
+        exchangeRate:
+          type: string
+          description: |
+            Exchange rate used for currency translation (string-encoded decimal, 6 decimal places).
+            1.000000 for INR-to-INR (no translation required).
+          pattern: '^\d+\.\d{6}$'
+          example: "1.000000"
+        taxCode:
+          type: string
+          description: |
+            SAP Tax Code (2-char). Null if line item is not tax-relevant.
+            Common: I8=GST 18%, I5=GST 5%, I12=GST 12%.
+          maxLength: 2
+          nullable: true
+          example: I8
+        taxSplit:
+          description: |
+            Indian GST tax split (CGST/SGST/IGST/CESS).
+            Required when taxCode is not null. Amounts must sum to the total tax amount.
+            All amounts must be in INR (RBI/GST compliance requirement).
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/TaxSplit'
+        costObject:
+          description: |
+            SAP cost object assignment for management accounting.
+            Null for balance sheet accounts (assets, liabilities).
+            Required for P&L accounts where controlling area is active.
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/CostObject'
+        lineItemText:
+          type: string
+          description: Free-text description of the line item.
+          maxLength: 50
+          example: Steel coils 500MT - Supplier INV-2026-9823
+        assignment:
+          type: string
+          description: |
+            SAP Assignment field (ZUONR). Used for line item sorting and grouping.
+            Typically contains PO number, customer/vendor invoice number, or asset number.
+          maxLength: 18
+          example: PO-4500001234-001
+        profitCenter:
+          type: string
+          description: |
+            SAP Profit Centre (denormalized from ACDOCA.PRCTR).
+            Populated from cost object assignment or document derivation rules.
+          maxLength: 10
+          nullable: true
+          example: PC_MH_PLANT1
+        segment:
+          type: string
+          description: |
+            SAP Segment (Profitability Segment from ACDOCA.SEGMENT).
+            Used for segment reporting in consolidated financials.
+          maxLength: 10
+          nullable: true
+          example: SEG_MANUFACTURING
+
+    TaxSplit:
+      type: object
+      description: |
+        Indian GST tax component split for a GL line item.
+        All amounts must be in INR as required by GST and RBI regulations.
+        CGST applies to intra-state supplies; IGST applies to inter-state supplies.
+        CGST + SGST = total GST rate for intra-state; IGST = total GST rate for inter-state.
+      required:
+        - cgstAmount
+        - sgstAmount
+        - igstAmount
+        - cessAmount
+        - taxCurrency
+      properties:
+        cgstAmount:
+          type: string
+          description: |
+            Central GST amount (applicable for intra-state supplies).
+            String-encoded decimal with max 2 decimal places. Must be "0.00" for inter-state.
+          pattern: '^\d+\.\d{2}$'
+          example: "5625.00"
+        sgstAmount:
+          type: string
+          description: |
+            State GST amount (applicable for intra-state supplies).
+            Must equal cgstAmount for standard rates. "0.00" for inter-state supplies.
+          pattern: '^\d+\.\d{2}$'
+          example: "5625.00"
+        igstAmount:
+          type: string
+          description: |
+            Integrated GST amount (applicable for inter-state supplies).
+            Must be "0.00" when cgstAmount and sgstAmount are non-zero.
+          pattern: '^\d+\.\d{2}$'
+          example: "0.00"
+        cessAmount:
+          type: string
+          description: |
+            GST Compensation Cess amount.
+            Applicable to specific goods (automobiles, tobacco, luxury items).
+            "0.00" for standard goods and services.
+          pattern: '^\d+\.\d{2}$'
+          example: "0.00"
+        taxCurrency:
+          type: string
+          description: |
+            Currency of all tax amounts. MUST be "INR" (RBI data localisation and GST requirement).
+          enum:
+            - INR
+          example: INR
+        gstHsnSac:
+          type: string
+          description: |
+            HSN (Harmonized System Nomenclature) code for goods or
+            SAC (Service Accounting Code) for services.
+            Required for B2B invoices above INR 5 lakhs.
+          maxLength: 8
+          nullable: true
+          example: "72081090"
+        supplyType:
+          type: string
+          description: Type of supply determining CGST/SGST vs IGST applicability.
+          enum:
+            - INTRA_STATE
+            - INTER_STATE
+            - EXPORT
+            - IMPORT
+          nullable: true
+          example: INTRA_STATE
+
+    CostObject:
+      type: object
+      description: |
+        SAP Controlling (CO) cost object assignment.
+        Exactly one of costCenter, wbsElement, or internalOrder must be non-null
+        for P&L line items. All may be null for balance sheet accounts.
+      properties:
+        costCenter:
+          type: string
+          description: |
+            SAP Cost Centre code (max 10 alphanumeric chars).
+            Must exist in the FinSight cost centre master (synced via DST-004).
+          maxLength: 10
+          nullable: true
+          example: CC_MH_PROD_01
+        profitCenter:
+          type: string
+          description: |
+            SAP Profit Centre code (max 10 alphanumeric chars).
+            Must exist in the FinSight profit centre master (synced via DST-005).
+          maxLength: 10
+          nullable: true
+          example: PC_MH_PLANT1
+        wbsElement:
+          type: string
+          description: |
+            SAP Work Breakdown Structure (WBS) element for project accounting.
+            Format: {ProjectNumber}.{Phase}.{Sub} e.g. "P-MH01-2026.1.1".
+          maxLength: 24
+          nullable: true
+          example: null
+        internalOrder:
+          type: string
+          description: |
+            SAP Internal Order number for overhead cost collection.
+            12-digit numeric identifier.
+          maxLength: 12
+          nullable: true
+          example: null
+        functionalArea:
+          type: string
+          description: SAP Functional Area for government/public sector reporting.
+          maxLength: 16
+          nullable: true
+          example: null
+
+    MonetaryAmount:
+      type: object
+      description: |
+        A monetary amount with its currency.
+        Amount is string-encoded to preserve decimal precision for financial data.
+        Do not use float or double for financial amounts.
+      required:
+        - amount
+        - currency
+      properties:
+        amount:
+          type: string
+          description: |
+            String-encoded decimal amount. Max 4 decimal places.
+            Negative amounts use leading minus sign (e.g. "-1250.00").
+            No thousand separators (no commas).
+          pattern: '^-?\d+\.\d{1,4}$'
+          example: "125000.00"
+        currency:
+          type: string
+          description: ISO 4217 3-character currency code.
+          pattern: '^[A-Z]{3}$'
+          minLength: 3
+          maxLength: 3
+          example: INR
+
+    # --------------------------------------------------------
+    # ACCOUNTS PAYABLE SCHEMAS (DST-002)
+    # --------------------------------------------------------
+
+    APItemBatchRequest:
+      type: object
+      description: |
+        Root request body for Accounts Payable open items batch ingestion.
+        Extracted from SAP BSIK/BSAK via ODP DataSource 0FI_AP_4.
+      required:
+        - batchId
+        - sourceSystem
+        - extractionTimestamp
+        - companyCode
+        - items
+      properties:
+        batchId:
+          type: string
+          description: Client-generated unique batch identifier.
+          pattern: '^batch-[a-z]+-\d{8}-\d{4}-\d{3}$'
+          maxLength: 64
+          example: batch-ap-20261004-0600-001
+        sourceSystem:
+          type: string
+          description: Identifier of the SAP source system.
+          enum:
+            - SAP-S4HANA-PRD
+            - SAP-S4HANA-QAS
+            - SAP-S4HANA-DEV
+          example: SAP-S4HANA-PRD
+        extractionTimestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of ODP delta extraction trigger time.
+          example: "2026-10-04T06:00:00+05:30"
+        companyCode:
+          type: string
+          description: SAP Company Code for all items in this batch.
+          pattern: '^\d{4}$'
+          example: "1000"
+        items:
+          type: array
+          description: Array of AP open item records. Maximum 1,000 items.
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/APLineItem'
+
+    APLineItem:
+      type: object
+      description: |
+        A single SAP Accounts Payable open item.
+        Corresponds to a row in BSIK (open items) or BSAK (cleared items).
+        Open items have clearingDate as null; cleared items have a clearingDate.
+      required:
+        - vendor
+        - companyCode
+        - documentNumber
+        - fiscalYear
+        - documentType
+        - postingDate
+        - documentDate
+        - netDueDate
+        - outstandingAmount
+      properties:
+        vendor:
+          type: string
+          description: SAP Vendor account number (alphanumeric, max 10 chars).
+          maxLength: 10
+          example: VENDOR_0010012345
+        vendorName:
+          type: string
+          description: Vendor name from SAP LFA1 (denormalized).
+          maxLength: 80
+          example: TATA STEEL LIMITED
+        vendorGstin:
+          type: string
+          description: |
+            Vendor GST Identification Number (15-char alphanumeric).
+            Required for GST input tax credit eligibility determination.
+          pattern: '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'
+          nullable: true
+          example: 27AAACT2727Q1ZV
+        companyCode:
+          type: string
+          description: SAP Company Code.
+          pattern: '^\d{4}$'
+          example: "1000"
+        documentNumber:
+          type: string
+          description: SAP Accounting Document Number (10 digits, zero-padded).
+          pattern: '^\d{10}$'
+          example: "1900000456"
+        fiscalYear:
+          type: string
+          description: SAP Fiscal Year (4-digit).
+          pattern: '^\d{4}$'
+          example: "2026"
+        documentType:
+          type: string
+          description: |
+            SAP Document Type. AP types: KR (vendor invoice), KZ (vendor payment),
+            KA (vendor document), RE (goods receipt invoice verification).
+          maxLength: 2
+          example: KR
+        postingDate:
+          type: string
+          format: date
+          description: Posting date in SAP (ISO 8601 date).
+          example: "2026-09-25"
+        documentDate:
+          type: string
+          format: date
+          description: Date on the vendor invoice (ISO 8601 date).
+          example: "2026-09-20"
+        netDueDate:
+          type: string
+          format: date
+          description: |
+            Net payment due date calculated from payment terms and baseline date.
+            Used for AP ageing bucket classification.
+          example: "2026-10-25"
+        outstandingAmount:
+          description: Outstanding (unpaid) amount as of extraction timestamp.
+          allOf:
+            - $ref: '#/components/schemas/MonetaryAmount'
+        originalAmount:
+          description: Original invoice/document amount before any partial payments.
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/MonetaryAmount'
+        paymentTerms:
+          type: string
+          description: |
+            SAP Payment Terms key (e.g. NT30 = Net 30 days, 2%10NT30 = 2/10 Net 30).
+          maxLength: 4
+          nullable: true
+          example: NT30
+        paymentBlock:
+          type: string
+          description: |
+            SAP Payment Block indicator. Non-null means payment is blocked.
+            Common: 'R' = blocked for payment, 'A' = free for payment (null in practice).
+          maxLength: 1
+          nullable: true
+          example: null
+        paymentMethod:
+          type: string
+          description: |
+            SAP Payment Method (single char). T=Bank Transfer, C=Cheque, B=Bill of Exchange.
+          maxLength: 1
+          nullable: true
+          example: T
+        bankKey:
+          type: string
+          description: SAP Bank Key (BANKL) — identifies vendor's bank.
+          maxLength: 15
+          nullable: true
+          example: HDFC0000123
+        bankAccount:
+          type: string
+          description: Vendor's bank account number.
+          maxLength: 18
+          nullable: true
+          example: "50100123456789"
+        ageingBucket:
+          type: string
+          description: |
+            AP ageing bucket classification based on net due date.
+            Calculated by integration transformation worker.
+          enum:
+            - CURRENT
+            - OVERDUE_1_30
+            - OVERDUE_31_60
+            - OVERDUE_61_90
+            - OVERDUE_91_180
+            - OVERDUE_180_PLUS
+          example: CURRENT
+        daysOverdue:
+          type: integer
+          description: |
+            Number of days the item is overdue as of extraction timestamp.
+            Negative values indicate days until due date (not yet due).
+          example: 0
+        clearingDate:
+          type: string
+          format: date
+          description: Date on which the item was cleared (paid). Null for open items.
+          nullable: true
+          example: null
+        clearingDocument:
+          type: string
+          description: Clearing document number. Null for open items.
+          nullable: true
+          example: null
+        withholdingTax:
+          description: |
+            Section 194 TDS (Tax Deducted at Source) details.
+            Required for vendors subject to TDS under Income Tax Act.
+            Sections: 194C (contractors), 194J (professionals), 194H (commission).
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/WithholdingTax'
+        gstInputTaxCreditEligible:
+          type: boolean
+          description: |
+            Whether input tax credit (ITC) can be claimed on this AP item.
+            True only if: (1) vendor has valid GSTIN, (2) supply is for business use,
+            (3) vendor has filed GSTR-1 and the invoice appears in GSTR-2B.
+          example: true
+        gstTaxCode:
+          type: string
+          description: SAP Tax Code for GST (matches taxCode on the corresponding GL line item).
+          maxLength: 2
+          nullable: true
+          example: I8
+        invoiceReference:
+          type: string
+          description: Vendor's own invoice number (external reference).
+          maxLength: 16
+          nullable: true
+          example: TATA-INV-2026-98234
+        purchaseOrderReference:
+          type: string
+          description: SAP Purchase Order number linked to this AP item.
+          maxLength: 10
+          nullable: true
+          example: "4500001234"
+        plant:
+          type: string
+          description: SAP Plant code where goods/services were received.
+          maxLength: 4
+          nullable: true
+          example: MH01
+        costCenter:
+          type: string
+          description: Cost Centre for services (where applicable).
+          maxLength: 10
+          nullable: true
+          example: CC_MH_PROD_01
+
+    WithholdingTax:
+      type: object
+      description: |
+        Income Tax Act withholding tax (TDS) details for a vendor AP item.
+        Complies with Section 194C, 194J, 194H, 194Q, and other applicable sections.
+        All amounts must be in INR.
+      required:
+        - section
+        - taxType
+        - baseAmount
+        - taxRate
+        - taxAmount
+        - totalTdsAmount
+        - deductionStatus
+        - currency
+      properties:
+        section:
+          type: string
+          description: |
+            Income Tax Act Section under which TDS is deducted.
+          enum:
+            - 194C
+            - 194J
+            - 194H
+            - 194Q
+            - 194I
+            - 194IA
+            - 194IB
+            - 192
+            - 195
+            - OTHER
+          example: 194C
+        taxType:
+          type: string
+          description: SAP Withholding Tax Type code (2-char).
+          maxLength: 2
+          example: C1
+        baseAmount:
+          type: string
+          description: TDS taxable base amount (string-encoded decimal, INR).
+          pattern: '^\d+\.\d{2}$'
+          example: "3450000.00"
+        taxRate:
+          type: string
+          description: TDS rate applicable as percentage (string-encoded decimal, 2 decimal places).
+          pattern: '^\d+\.\d{2}$'
+          example: "2.00"
+        taxAmount:
+          type: string
+          description: TDS amount (baseAmount × taxRate / 100), before surcharge and cess.
+          pattern: '^\d+\.\d{2}$'
+          example: "69000.00"
+        surchargeAmount:
+          type: string
+          description: Surcharge on TDS (applicable if vendor is non-resident or specified category).
+          pattern: '^\d+\.\d{2}$'
+          default: "0.00"
+          example: "0.00"
+        cessAmount:
+          type: string
+          description: |
+            Health and Education Cess (4% on TDS + surcharge for non-residents;
+            not applicable for resident vendors in standard cases).
+          pattern: '^\d+\.\d{2}$'
+          default: "0.00"
+          example: "2760.00"
+        totalTdsAmount:
+          type: string
+          description: Total TDS amount deducted (taxAmount + surchargeAmount + cessAmount).
+          pattern: '^\d+\.\d{2}$'
+          example: "71760.00"
+        deductionStatus:
+          type: string
+          description: Current TDS deduction status.
+          enum:
+            - DEDUCTED
+            - PENDING
+            - EXEMPT
+            - LOWER_DEDUCTION
+            - NIL_DEDUCTION
+          example: DEDUCTED
+        tdsDeductedDate:
+          type: string
+          format: date
+          description: Date on which TDS was deducted. Null if not yet deducted.
+          nullable: true
+          example: "2026-09-25"
+        tdsChallanNumber:
+          type: string
+          description: ITNS 281 challan number for TDS deposit to government. Null if not yet paid.
+          maxLength: 20
+          nullable: true
+          example: null
+        panNumber:
+          type: string
+          description: |
+            Vendor's PAN (Permanent Account Number). Required for TDS deduction.
+            If not available, TDS is deducted at 20% (higher rate under Section 206AA).
+          pattern: '^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
+          nullable: true
+          example: AAACT2727Q
+        currency:
+          type: string
+          description: Currency of all TDS amounts. Must be INR.
+          enum:
+            - INR
+          example: INR
+
+    # --------------------------------------------------------
+    # RESPONSE SCHEMAS
+    # --------------------------------------------------------
+
+    BatchIngestResponse:
+      type: object
+      description: Standard response for a successful batch ingestion request.
+      properties:
+        data:
+          $ref: '#/components/schemas/BatchIngestData'
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        links:
+          $ref: '#/components/schemas/ResponseLinks'
+
+    BatchIngestData:
+      type: object
+      description: Data payload for batch ingestion response.
+      properties:
+        batchId:
+          type: string
+          description: The batch ID from the request, confirmed by the server.
+          example: batch-gl-20261004-0600-001
+        status:
+          type: string
+          description: Initial processing status of the batch.
+          enum:
+            - ACCEPTED
+            - REJECTED
+          example: ACCEPTED
+        acceptedDocuments:
+          type: integer
+          description: Number of documents accepted for processing.
+          example: 1
+        acceptedLineItems:
+          type: integer
+          description: Total number of line items accepted across all documents.
+          example: 2
+        rejectedDocuments:
+          type: integer
+          description: Number of documents rejected due to validation errors.
+          example: 0
+        rejectedItems:
+          type: array
+          description: Details of any rejected items (empty array if none rejected).
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+                description: Zero-based index of the rejected item in the request array.
+              reason:
+                type: string
+                description: Reason for rejection.
+        pipelineEventId:
+          type: string
+          description: |
+            Kafka event ID for the produced message (partition + offset reference).
+            Use for distributed tracing and support queries.
+          example: evt-kafka-sap.delta.transformed.gl-p12-o44821
+        estimatedProcessingTime:
+          type: string
+          description: ISO 8601 duration estimate for end-to-end pipeline processing.
+          example: PT30S
+
+    BatchStatusResponse:
+      type: object
+      description: Response for batch status polling.
+      properties:
+        data:
+          type: object
+          properties:
+            batchId:
+              type: string
+              example: batch-gl-20261004-0600-001
+            status:
+              type: string
+              enum:
+                - ACCEPTED
+                - PROCESSING
+                - COMPLETED
+                - PARTIAL_FAILURE
+                - FAILED
+              example: COMPLETED
+            processedDocuments:
+              type: integer
+              example: 1
+            processedLineItems:
+              type: integer
+              example: 2
+            failedDocuments:
+              type: integer
+              example: 0
+            startedAt:
+              type: string
+              format: date-time
+              example: "2026-10-04T00:30:01.123Z"
+            completedAt:
+              type: string
+              format: date-time
+              nullable: true
+              example: "2026-10-04T00:30:31.456Z"
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        links:
+          $ref: '#/components/schemas/ResponseLinks'
+
+    ResponseMeta:
+      type: object
+      description: Standard response metadata included in all API responses.
+      properties:
+        requestId:
+          type: string
+          format: uuid
+          description: Server-generated unique request identifier for this response.
+          example: req-f47ac10b-58cc-4372-a567-0e02b2c3d479
+        processedAt:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC timestamp of when the server processed the request.
+          example: "2026-10-04T00:30:01.123Z"
+        apiVersion:
+          type: string
+          description: API version that processed the request.
+          example: "2.0"
+        dataVersion:
+          type: string
+          description: Schema version of the response data.
+          example: "1.0.0"
+        totalCount:
+          type: integer
+          description: Total count of items in collection (for paginated responses). Null for mutations.
+          nullable: true
+          example: null
+        returnedCount:
+          type: integer
+          description: Count of items returned in this response page. Null for mutations.
+          nullable: true
+          example: null
+        hasNextPage:
+          type: boolean
+          description: Whether there are more pages available (cursor-based pagination).
+          default: false
+
+    ResponseLinks:
+      type: object
+      description: HATEOAS-style response links.
+      properties:
+        self:
+          type: string
+          description: URL of the current resource / endpoint.
+          example: /api/v2/finance/journal-entries
+        next:
+          type: string
+          description: URL for the next page of results (null if no next page).
+          nullable: true
+          example: null
+        prev:
+          type: string
+          description: URL for the previous page of results (null if no previous page).
+          nullable: true
+          example: null
+        status:
+          type: string
+          description: URL to poll the status of an async operation (for batch ingestion).
+          nullable: true
+          example: /api/v2/finance/journal-entries/batch/batch-gl-20261004-0600-001
+
+    HealthResponse:
+      type: object
+      description: Service health status response.
+      required:
+        - status
+        - timestamp
+      properties:
+        status:
+          type: string
+          enum:
+            - UP
+            - DOWN
+            - DEGRADED
+          example: UP
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-10-04T00:30:00.000Z"
+        version:
+          type: string
+          example: 2.0.0
+        dependencies:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status:
+                type: string
+                enum:
+                  - UP
+                  - DOWN
+              latencyMs:
+                type: integer
+                description: Dependency health check round-trip latency in milliseconds.
+          example:
+            kafka:
+              status: UP
+              latencyMs: 4
+            postgresql:
+              status: UP
+              latencyMs: 2
+            redis:
+              status: UP
+              latencyMs: 1
+
+    # --------------------------------------------------------
+    # ERROR SCHEMAS (RFC 7807 Problem Details)
+    # --------------------------------------------------------
+
+    ProblemDetail:
+      type: object
+      description: |
+        RFC 7807 Problem Details for HTTP APIs error response.
+        All error responses from FinSight API conform to this schema.
+        Content-Type: application/problem+json
+      required:
+        - type
+        - title
+        - status
+        - detail
+        - instance
+      properties:
+        type:
+          type: string
+          format: uri
+          description: |
+            URI reference identifying the problem type.
+            Resolves to human-readable documentation of the error.
+          example: https://finsight.zetheta.in/errors/validation-error
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type.
+          example: Request Validation Failed
+        status:
+          type: integer
+          description: HTTP status code for this occurrence of the problem.
+          minimum: 400
+          maximum: 599
+          example: 400
+        detail:
+          type: string
+          description: |
+            Human-readable explanation specific to this occurrence of the problem.
+            Should include actionable information for the API consumer.
+          example: "3 validation errors found in the request body. See 'errors' array for details."
+        instance:
+          type: string
+          description: URI reference identifying the specific occurrence of the problem.
+          example: /api/v2/finance/journal-entries
+        requestId:
+          type: string
+          format: uuid
+          description: Server-generated request ID for support and tracing.
+          example: req-f47ac10b-58cc-4372-a567-0e02b2c3d479
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC timestamp of when the error occurred.
+          example: "2026-10-04T00:30:01.456Z"
+        errors:
+          type: array
+          description: Array of field-level validation errors (for 400/422 responses).
+          items:
+            $ref: '#/components/schemas/FieldError'
+
+    FieldError:
+      type: object
+      description: Details of a single field-level validation error within a Problem Detail response.
+      required:
+        - field
+        - code
+        - message
+      properties:
+        field:
+          type: string
+          description: |
+            JSONPath-style field reference indicating which request field failed validation.
+            Uses dot notation for nested fields and bracket notation for array indices.
+          example: "documents[0].lineItems[0].amountInTransactionCurrency.amount"
+        code:
+          type: string
+          description: |
+            Machine-readable error code for programmatic handling.
+            Convention: SCREAMING_SNAKE_CASE.
+          enum:
+            - REQUIRED_FIELD_MISSING
+            - INVALID_FORMAT
+            - INVALID_AMOUNT_FORMAT
+            - INVALID_CURRENCY_CODE
+            - INVALID_GL_ACCOUNT
+            - JOURNAL_UNBALANCED
+            - BATCH_SIZE_EXCEEDED
+            - INVALID_FISCAL_PERIOD
+            - TAX_SPLIT_REQUIRED
+            - TAX_SPLIT_AMOUNT_MISMATCH
+            - COST_OBJECT_REQUIRED
+            - INVALID_DATE_FORMAT
+            - MISSING_IDEMPOTENCY_KEY
+            - IDEMPOTENCY_CONFLICT
+            - VENDOR_NOT_FOUND
+            - INVALID_TDS_SECTION
+            - TDS_AMOUNT_MISMATCH
+          example: INVALID_AMOUNT_FORMAT
+        message:
+          type: string
+          description: Human-readable description of the validation error.
+          example: "Amount must be a string-encoded decimal with max 4 decimal places. Received: '125,000.00'"
+        rejectedValue:
+          type: string
+          description: The actual value that was rejected (stringified).
+          nullable: true
+          example: "125,000.00"
+
+  # ----------------------------------------------------------
+  # RESPONSES
+  # ----------------------------------------------------------
+  responses:
+    BadRequest:
+      description: |
+        Bad Request — The request body or parameters failed schema validation.
+        Check the `errors` array in the response for field-level details.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          examples:
+            missingIdempotencyKey:
+              summary: Missing Idempotency-Key header
+              value:
+                type: https://finsight.zetheta.in/errors/missing-idempotency-key
+                title: Missing Required Header
+                status: 400
+                detail: The 'Idempotency-Key' header is required for all POST requests. Provide a UUID v4 value.
+                instance: /api/v2/finance/journal-entries
+                requestId: req-00000000-0000-0000-0000-000000000001
+                timestamp: "2026-10-04T00:30:01.456Z"
+                errors:
+                  - field: headers.Idempotency-Key
+                    code: REQUIRED_FIELD_MISSING
+                    message: The Idempotency-Key header is required and must be a valid UUID v4.
+                    rejectedValue: null
+            invalidAmountFormat:
+              summary: Invalid amount format in line item
+              value:
+                type: https://finsight.zetheta.in/errors/validation-error
+                title: Request Validation Failed
+                status: 400
+                detail: 1 validation error in request body.
+                instance: /api/v2/finance/journal-entries
+                requestId: req-00000000-0000-0000-0000-000000000002
+                timestamp: "2026-10-04T00:30:01.456Z"
+                errors:
+                  - field: documents[0].lineItems[0].amountInTransactionCurrency.amount
+                    code: INVALID_AMOUNT_FORMAT
+                    message: Amount must be a string-encoded decimal (e.g. "125000.00"). No thousand separators.
+                    rejectedValue: "125,000.00"
+
+    Unauthorized:
+      description: |
+        Unauthorized — The JWT Bearer token is missing, malformed, expired,
+        or the signature cannot be verified against the JWKS endpoint.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://finsight.zetheta.in/errors/unauthorized
+            title: Unauthorized
+            status: 401
+            detail: "JWT Bearer token is missing or expired. Obtain a new token from https://auth.finsight.zetheta.in/oauth/v2/token"
+            instance: /api/v2/finance/journal-entries
+            requestId: req-00000000-0000-0000-0000-000000000003
+            timestamp: "2026-10-04T00:30:01.456Z"
+            errors: []
+
+    Forbidden:
+      description: |
+        Forbidden — The JWT token is valid but does not contain the required OAuth 2.0 scope
+        for this endpoint. Obtain a token with the correct scopes.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://finsight.zetheta.in/errors/insufficient-scope
+            title: Insufficient OAuth Scope
+            status: 403
+            detail: "This endpoint requires scope 'finsight.gl.write'. The provided token has scopes: 'finsight.recon.read'."
+            instance: /api/v2/finance/journal-entries
+            requestId: req-00000000-0000-0000-0000-000000000004
+            timestamp: "2026-10-04T00:30:01.456Z"
+            errors: []
+
+    NotFound:
+      description: The requested resource was not found.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://finsight.zetheta.in/errors/not-found
+            title: Resource Not Found
+            status: 404
+            detail: "Batch 'batch-gl-20261004-0600-099' was not found. It may have expired (batches are retained for 90 days)."
+            instance: /api/v2/finance/journal-entries/batch/batch-gl-20261004-0600-099
+            requestId: req-00000000-0000-0000-0000-000000000005
+            timestamp: "2026-10-04T00:30:01.456Z"
+            errors: []
+
+    IdempotencyConflict:
+      description: |
+        Conflict — The `Idempotency-Key` provided was already used for a request
+        with a **different payload**. This indicates a client-side error.
+        If you intended to retry the same request, the payload must be identical.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://finsight.zetheta.in/errors/idempotency-conflict
+            title: Idempotency Key Conflict
+            status: 409
+            detail: "Idempotency-Key 'f47ac10b-58cc-4372-a567-0e02b2c3d479' was previously used with a different request payload. Generate a new UUID v4 for different requests."
+            instance: /api/v2/finance/journal-entries
+            requestId: req-00000000-0000-0000-0000-000000000006
+            timestamp: "2026-10-04T00:30:01.456Z"
+            errors: []
+
+    UnprocessableEntity:
+      description: |
+        Unprocessable Entity — The request is syntactically valid but fails
+        business rule validation. Common causes:
+        - Unbalanced journal entry (debits ≠ credits)
+        - Invalid GL account (not in Meridian CoA)
+        - TDS amount does not match calculated amount from rate × base
+        - GST tax split amounts do not sum correctly
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          examples:
+            unbalancedJournal:
+              summary: Unbalanced GL journal entry
+              value:
+                type: https://finsight.zetheta.in/errors/journal-entry-unbalanced
+                title: Unprocessable Journal Entry
+                status: 422
+                detail: "Journal entry 1400000123 is unbalanced: total debits INR 125000.00 ≠ total credits INR 120000.00. Difference: INR 5000.00."
+                instance: /api/v2/finance/journal-entries
+                requestId: req-00000000-0000-0000-0000-000000000007
+                timestamp: "2026-10-04T00:30:01.456Z"
+                errors:
+                  - field: documents[0]
+                    code: JOURNAL_UNBALANCED
+                    message: "Debit total (125000.00 INR) must equal credit total (120000.00 INR)"
+                    rejectedValue: null
+            tdsMismatch:
+              summary: TDS amount does not match calculated amount
+              value:
+                type: https://finsight.zetheta.in/errors/tds-amount-mismatch
+                title: TDS Amount Mismatch
+                status: 422
+                detail: "TDS amount mismatch for vendor VENDOR_0010012345. Declared: 69000.00, Calculated (194C @ 2% of 3450000.00): 69000.00. Surcharge mismatch: declared 500.00, expected 0.00."
+                instance: /api/v2/finance/accounts-payable/items
+                requestId: req-00000000-0000-0000-0000-000000000008
+                timestamp: "2026-10-04T00:30:01.456Z"
+                errors:
+                  - field: items[0].withholdingTax.surchargeAmount
+                    code: TDS_AMOUNT_MISMATCH
+                    message: Surcharge is not applicable for resident vendor under Section 194C. Expected 0.00.
+                    rejectedValue: "500.00"
+
+    TooManyRequests:
+      description: |
+        Too Many Requests — The client has exceeded its rate limit.
+        Wait for `Retry-After` seconds before submitting the next request.
+      headers:
+        Retry-After:
+          description: Number of seconds to wait before retrying.
+          schema:
+            type: integer
+            example: 42
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/XRateLimitLimit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/XRateLimitRemaining'
+        X-RateLimit-Reset:
+          $ref: '#/components/headers/XRateLimitReset'
+        X-RateLimit-Window:
+          $ref: '#/components/headers/XRateLimitWindow'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://finsight.zetheta.in/errors/rate-limit-exceeded
+            title: Too Many Requests
+            status: 429
+            detail: "Rate limit of 5000 requests per 60 seconds exceeded. Retry after 42 seconds."
+            instance: /api/v2/finance/journal-entries
+            requestId: req-00000000-0000-0000-0000-000000000009
+            timestamp: "2026-10-04T00:30:01.456Z"
+            errors: []
+
+    InternalServerError:
+      description: |
+        Internal Server Error — An unexpected server-side error occurred.
+        The `requestId` in the response can be used to trace the error in server logs.
+        Please report persistent 500 errors to fde-meridian@zetheta.in.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://finsight.zetheta.in/errors/internal-server-error
+            title: Internal Server Error
+            status: 500
+            detail: An unexpected error occurred while processing the request. The engineering team has been alerted.
+            instance: /api/v2/finance/journal-entries
+            requestId: req-00000000-0000-0000-0000-000000000010
+            timestamp: "2026-10-04T00:30:01.456Z"
+            errors: []
+
+    ServiceUnavailable:
+      description: |
+        Service Unavailable — The FinSight ingestion pipeline is temporarily unavailable.
+        This typically indicates the Circuit Breaker is in OPEN state due to downstream failures.
+        Retry after the `Retry-After` duration. Events will be preserved in DLQ during outage.
+      headers:
+        Retry-After:
+          description: Seconds until the circuit breaker enters HALF-OPEN state for probe.
+          schema:
+            type: integer
+            example: 30
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://finsight.zetheta.in/errors/service-unavailable
+            title: Service Temporarily Unavailable
+            status: 503
+            detail: "The FinSight analytics pipeline is temporarily unavailable (circuit breaker OPEN). Your data is preserved in the DLQ and will be reprocessed automatically. Retry after 30 seconds."
+            instance: /api/v2/finance/journal-entries
+            requestId: req-00000000-0000-0000-0000-000000000011
+            timestamp: "2026-10-04T00:30:01.456Z"
+            errors: []
+
+# ============================================================
+# END OF SPECIFICATION
+# ============================================================
+# Document  : ZA-FDE-D2-MERIDIAN-001-OAS v1.0.0
+# Generated : 04 October 2026
+# © 2026 Zetheta Algorithms Pvt. Ltd. All rights reserved.
+# ============================================================

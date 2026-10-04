@@ -1,0 +1,271 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 4,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "MON-001: Pipeline Health Overview",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "min(min_over_time(up{job=\"meridian-pipeline-workers\"}[5m]) and (circuit_breaker_state{target=\"finsight\"} == 0) and (rate(financial_reconciliation_breaks_total[1h]) == 0))",
+          "legendFormat": "Pipeline Health",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "CRITICAL / DEGRADED", "color": "red" }, "1": { "text": "OPTIMAL / HEALTHY", "color": "green" } } },
+            { "type": "special", "options": { "match": "null", "result": { "text": "OFFLINE", "color": "dark-red" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "MON-002: End-to-End Throughput (Records/Sec)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (plant_id) (rate(pipeline_records_processed_total{status=\"COMMITTED\"}[1m]))",
+          "legendFormat": "Plant {{ plant_id }}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15 }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "MON-003: Processing Latency Distribution (P50, P95, P99)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(pipeline_processing_duration_seconds_bucket[5m])))", "legendFormat": "P50 Latency", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(pipeline_processing_duration_seconds_bucket[5m])))", "legendFormat": "P95 Latency", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(pipeline_processing_duration_seconds_bucket[5m])))", "legendFormat": "P99 Latency", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 15 }] }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "MON-004: Error Rate Percentage by Error Class",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum by (error_class) (rate(pipeline_errors_total[5m])) / sum(rate(pipeline_records_processed_total[5m])) * 100",
+          "legendFormat": "{{ error_class }}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": { "stacking": { "mode": "normal", "group": "A" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 }] }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "MON-005: Dead Letter Queue (DLQ) Backlog Depth",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum(s3_dlq_unprocessed_records_count{bucket=\"meridian-prod-dlq-ap-south-1\"})",
+          "legendFormat": "Quarantine Backlog",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 250 }] }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "MON-006: Daily Financial Reconciliation Break Status",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum(daily_financial_reconciliation_break_amount_inr)",
+          "legendFormat": "Ledger Break Amount",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyINR",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": 0 }, { "color": "red", "value": 0.01 }] },
+          "mappings": [{ "type": "value", "options": { "0": { "text": "0.00 INR (ZERO BREAK)", "color": "green" } } }]
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "MON-007: SAP RFC Connection Pool Utilization (out of 50)",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "sum(sap_rfc_pool_active_connections{instance=~\".*pune-dc.*\"})",
+          "legendFormat": "Active Connections",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 50,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": 0 }, { "color": "yellow", "value": 35 }, { "color": "red", "value": 45 }] }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "MON-008: FinSight Ingestion API Health & Rate Limits",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 12 },
+      "targets": [
+        {
+          "expr": "sum by (status_code) (rate(http_client_requests_total{target=\"finsight-api\"}[1m]))",
+          "legendFormat": "HTTP {{ status_code }}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "MON-009: Data Freshness SLA Tracker (Minutes since last sync)",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 12 },
+      "targets": [
+        {
+          "expr": "(time() - max by (plant_id) (pipeline_last_successful_sync_timestamp)) / 60",
+          "legendFormat": "Plant {{ plant_id }}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 60,
+          "unit": "m",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": 0 }, { "color": "yellow", "value": 25 }, { "color": "red", "value": 30 }] }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "MON-010: Compute & Network Saturation (Worker CPU/Memory/Bandwidth)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "expr": "sum(rate(container_network_transmit_bytes_total{namespace=\"meridian-etl\"}[1m])) * 8 / 1000000",
+          "legendFormat": "MPLS Egress Bandwidth (Mbps)",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(container_memory_working_set_bytes{namespace=\"meridian-etl\"}) / 1073741824",
+          "legendFormat": "Cluster Memory (GB)",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line" }
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "MON-011: Kafka Consumer Group Lag per Topic Partition",
+      "type": "bargauge",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 18 },
+      "targets": [
+        {
+          "expr": "sum by (topic, partition) (kafka_consumergroup_lag{consumergroup=\"meridian-fin-ingest\"})",
+          "legendFormat": "{{ topic }} [P{{ partition }}]",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": 0 }, { "color": "yellow", "value": 5000 }, { "color": "red", "value": 25000 }] }
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "MON-012: Circuit Breaker State Status (Closed=0, Open=1, Half-Open=2)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 18 },
+      "targets": [
+        {
+          "expr": "max by (target) (circuit_breaker_state)",
+          "legendFormat": "{{ target }}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "CLOSED (Normal)", "color": "green" }, "1": { "text": "OPEN (Failing Fast)", "color": "red" }, "2": { "text": "HALF-OPEN (Canary)", "color": "yellow" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": 0 }, { "color": "red", "value": 1 }, { "color": "yellow", "value": 2 }] }
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["meridian", "sre", "sap", "finsight", "financial-integration"],
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": { "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"] },
+  "timezone": "browser",
+  "title": "Meridian ERP-to-FinSight Pipeline SRE Cockpit",
+  "uid": "meridian-erp-sre-overview",
+  "version": 1
+}
